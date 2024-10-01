@@ -7,111 +7,104 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from collections import deque
 
-# set up chrome for headless mode
-chrome_options = Options()
-chrome_options.add_argument("--headless")  # run in headless mode
-chrome_options.add_argument("--disable-gpu")  # disable gpu acceleration
+print("Crawler initiated")
 
-# set up the webdriver
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--disable-gpu")
+
 driverService = Service(ChromeDriverManager().install())
 driver = webdriver.Chrome(service=driverService, options=chrome_options)
-# driver.maximize_window()
 
-# start with the main page
-start_url = "https://www.finance.yahoo.com/"
-driver.get(start_url)
+urls = deque([
+    "https://www.finance.yahoo.com/",
+    "https://www.cnbc.com/",
+])
 
-# set up the queue and visited urls set
-url_queue = deque([start_url])
 visited_urls = set()
+pages_crawled = 0
+
+articles = []
+articles_titles = set()
 
 
-# infinite scroll function
-def infinite_scroll():
-    scroll_pause_time = 2  # pause time for dynamic content to load
-    last_height = driver.execute_script("return document.body.scrollHeight")
+def internal_links_new(parent):
+    desired_texts = ["news", "market"]
+    parent_links = parent.find_elements(By.CSS_SELECTOR, "a")
+    int_links = set()
 
-    while True:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(scroll_pause_time)
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            break
-        last_height = new_height
+    for int_link in parent_links:
+        int_href = int_link.get_attribute("href")
 
-
-# get all internal links on the page
-def get_internal_links():
-    page_links = driver.find_elements(By.TAG_NAME, 'a')
-    int_links = set()  # internal links
-
-    for page_link in page_links:
-        href = page_link.get_attribute('href')
-        if href and start_url in href and href not in visited_urls:
-            int_links.add(href)
+        # Check if int_href exists, contains any of the desired_texts, and is not already visited
+        if int_href and any(text in int_href for text in desired_texts) and int_href not in visited_urls:
+            int_links.add(int_href)
 
     return int_links
 
 
-# store the scraped data in a list
-articles = []
-article_titles = set()  # set to track unique article titles
+print("-" * 10)
+while urls:
+    url = urls.popleft()  # Process the next URL
 
-# set a limit for pages to crawl
-MAX_PAGES = 100
-pages_crawled = 0
+    try:
+        print(f"Crawler processing: {url}")
+        driver.get(url)
 
-# crawler loop
-while url_queue and pages_crawled < MAX_PAGES:
-    current_url = url_queue.popleft()
-    if current_url in visited_urls:
+        content = driver.find_elements(By.CSS_SELECTOR, "div.content, li.js-stream-content, "
+                                                        "div.FeaturedCard-contentText, div.RiverHeadline-headline, "
+                                                        "div.LatestNews-headlineWrapper, div.Card-pro",)
+        navigation = driver.find_elements(By.CSS_SELECTOR, "li._yb_l34kgb, ul.nav-menu-subLinks",)
+
+        # For storing links discovered in this iteration
+        internal_links = set()
+
+        for data in content:
+            try:
+                title = data.find_element(By.CSS_SELECTOR, "h2, h3, a").text
+                link = data.find_element(By.TAG_NAME, "a").get_attribute("href")
+
+                # check for uniqueness before appending
+                if title not in articles_titles:
+                    articles.append({'title': title, 'link': link})
+                    articles_titles.add(title)
+
+            except Exception as e:
+                print(f"Content scraping failed: {e}")
+                continue
+
+        for link in navigation:
+            try:
+                retrieved_links = internal_links_new(link)
+                internal_links.update(retrieved_links)
+
+            except Exception as e:
+                print(f"Navigation link scraping failed: {e}")
+                continue
+
+    except Exception as e:
+        print(f"URL loading failed: {e}")
         continue
 
-    # visit the url and add it to the visited set
-    driver.get(current_url)
-    visited_urls.add(current_url)
-    pages_crawled += 1  # increment the pages_crawled counter
+    pages_crawled += 1
+    visited_urls.add(url)
+    print(f"Crawled {pages_crawled} pages so far")
 
-    # scroll to load dynamic content
-    infinite_scroll()
+    # Ensure only unvisited URLs are added to the queue
+    for link in internal_links:
+        if link not in visited_urls and link not in urls:
+            urls.append(link)
 
-    # scrape the articles on the current page
-    headlines = driver.find_elements(By.CSS_SELECTOR, "div.content.yf-16rx63c, div.content.yf-1e4au4k")
+    print(f"Retrieved {len(articles)} articles so far")
+    print("-" * 10)
 
-    for headline in headlines:
-        try:
-            title_element = headline.find_element(By.CSS_SELECTOR, 'h2, h3')
-            title = title_element.text
-            link = headline.find_element(By.TAG_NAME, 'a').get_attribute("href")
+print(f"Crawled {pages_crawled} pages in total")
+print(f"Retrieved {len(articles)} articles in total")
 
-            # check for uniqueness before appending
-            if title not in article_titles:
-                articles.append({'title': title, 'link': link})
-                article_titles.add(title)  # add to the set to track unique titles
-
-        except Exception as e:
-            print(f"Error scraping headline: {e}")
-            continue
-
-    # extract internal links and add to the queue
-    internal_links = get_internal_links()
-    url_queue.extend(internal_links)
-
-    # delay between page requests to avoid rate limiting
-    time.sleep(2)
-
-    print(f"Crawled {pages_crawled} pages so far.")
-
-
-# close the browser
-driver.quit()
-
-# convert the articles list to a DataFrame
+# Save the articles to a CSV file
 df = pd.DataFrame(articles)
+df.to_csv('articles.csv', index=False)
+print(f"{len(articles)} saved to articles.csv")
 
-# save the data to a CSV file
-df.to_csv('financial_news_crawler.csv', index=False)
-print(f"Data saved to financial_news_crawler.csv with {len(articles)} articles.")
-
-# close the browser
 driver.quit()
+print("Crawling done!")
